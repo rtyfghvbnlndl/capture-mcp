@@ -108,5 +108,6 @@ Windows 上把 `bin/python` 换成 `Scripts\python.exe`。
 | 1080p 很卡 | 看 `list_devices` 里的编码，应为 MJPG；如果不是，设置 `CAPTURE_BACKEND=msmf` 或降低分辨率 |
 | 模型说看不到图 | 客户端可能没把工具返回的图片交给模型。设置 `CAPTURE_SAVE_DIR` 把图存下来排查 |
 | 安装时 pip 报 `SSLEOFError` / `UNEXPECTED_EOF_WHILE_READING` | 本机代理（`HTTPS_PROXY`）和 Python 的 TLS 不兼容。安装时临时清空代理：PowerShell 里先执行 `$env:HTTPS_PROXY=""; $env:HTTP_PROXY=""` 再运行安装脚本 |
+| 清空代理后 pip 装 `git+https://github.com/...` 报 `Failed to connect to github.com` | 只让 git 走代理、pip 不走：`$env:HTTPS_PROXY=""; $env:GIT_CONFIG_COUNT="1"; $env:GIT_CONFIG_KEY_0="http.proxy"; $env:GIT_CONFIG_VALUE_0="http://127.0.0.1:<代理端口>"`，再执行 pip install |
 | 摄像头/采集卡打开了但始终全黑 | Windows 设置 → 隐私和安全性 → 摄像头 → 允许桌面应用访问摄像头；笔记本摄像头还要检查物理遮挡片 |
 | Linux 上没有设备 | 当前用户需要有 `/dev/video*` 的访问权限，一般加入 `video` 组即可 |
