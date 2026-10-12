@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "capture-mcp"
+version = "0.1.0"
+readme = "README.md"
+description = "MCP server that exposes a USB HDMI capture card (UVC camera) as a screen for vision LLMs"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "zumg" }]
+dependencies = [
+    "mcp>=1.10",
+    "opencv-python-headless>=4.8",
+    "numpy",
+]
+
+[project.optional-dependencies]
+enum = ["cv2-enumerate-cameras"]
+ocr = ["rapidocr", "onnxruntime"]
+dev = ["pytest"]
+
+[project.scripts]
+capture-mcp = "capture_mcp.__main__:main"
+
+[tool.setuptools]
+packages = ["capture_mcp"]

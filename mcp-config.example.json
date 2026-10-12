@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "capture-card": {
+      "command": "C:\\Users\\<user>\\.capture-mcp\\venv\\Scripts\\python.exe",
+      "args": ["-m", "capture_mcp"],
+      "env": {}
+    }
+  }
+}

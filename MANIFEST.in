@@ -1,0 +1,3 @@
+include LICENSE README.md AGENTS.md SYSTEM_PROMPT.md install.ps1 install.sh mcp-config.example.json
+recursive-include tests *.py
+global-exclude __pycache__ *.py[cod]
