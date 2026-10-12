@@ -6,7 +6,19 @@
 
 ## 安装
 
-最简单：运行安装脚本。它会在 `~/.capture-mcp/venv` 建 venv、安装、列出设备，并生成 `mcp-config.json`。
+直接从 GitHub 安装（不用下载源码）：
+
+```bash
+pip install "capture-mcp[enum] @ git+https://github.com/rtyfghvbnlndl/capture-mcp"
+```
+
+或者克隆后运行安装脚本：
+
+```bash
+git clone https://github.com/rtyfghvbnlndl/capture-mcp
+```
+
+安装脚本会在 `~/.capture-mcp/venv` 建 venv、安装、列出设备，并生成 `mcp-config.json`。
 给 agent 看的分步说明见 [AGENTS.md](AGENTS.md)，系统提示词见 [SYSTEM_PROMPT.md](SYSTEM_PROMPT.md)。
 
 ```bash

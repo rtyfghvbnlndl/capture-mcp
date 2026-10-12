@@ -24,6 +24,21 @@ tar -xzf capture_mcp-0.1.0.tar.gz && cd capture_mcp-0.1.0 && sh ./install.sh
 - 脚本做的事：安装依赖，检查导入，列出视频设备，最后把客户端配置写进同目录的 `mcp-config.json`。
 - 需要 OCR 工具（`read_text`）的话，加 `-Ocr`（Windows）或 `--ocr`（Linux/macOS）。
 
+**方式 A2：从 GitHub 克隆后运行安装脚本**
+
+```sh
+git clone https://github.com/rtyfghvbnlndl/capture-mcp && cd capture-mcp
+```
+
+然后同方式 A 运行 `install.ps1` 或 `install.sh`。
+
+**方式 C：用 pip 直接从 GitHub 安装**
+
+```sh
+python -m venv ~/.capture-mcp/venv
+~/.capture-mcp/venv/bin/python -m pip install "capture-mcp[enum] @ git+https://github.com/rtyfghvbnlndl/capture-mcp"
+```
+
 **方式 B：不解压，用 pip 直接安装压缩包**
 
 ```sh
