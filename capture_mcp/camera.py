@@ -1,8 +1,15 @@
 """Capture-card reader.
 
-A background thread keeps calling grab() so the driver buffer never holds stale frames; a frame is
-only decoded (retrieve()) when a caller asks for one, which keeps CPU low while guaranteeing that
-every returned frame was grabbed *after* the request.
+A background thread reads (grab + retrieve) every frame at the device's own pace and keeps only the
+latest one; callers wait for a frame that was read *after* their request.
+While nobody asks for frames (ACTIVE_S after the last request) the thread stops decoding and only
+does an occasional health-check read, so an idle server costs almost no CPU.
+
+Reading every frame, not just grabbing, matters: OpenCV's DirectShow backend (the Windows default)
+returns from grab() immediately and holds the first frame that arrives after the last retrieve(),
+dropping all later ones until the next retrieve(). Decoding only on demand therefore handed out the
+frame from just after the *previous* screenshot (the "first screenshot is old" bug), and the grab()
+loop busy-spun a CPU core.
 """
 
 from __future__ import annotations
@@ -23,10 +30,17 @@ log = logging.getLogger(__name__)
 
 FAILS_BEFORE_RECONNECT = 30
 WARMUP_S = 2.5
+ACTIVE_S = 5.0              # keep reading at full rate this long after the last request
+IDLE_CHECK_S = 5.0          # while idle, one read this often to notice an unplugged card
+FRESH_FALLBACK_READS = 4    # backends that never block: trust the Nth read after the request
 
 
 class CaptureError(RuntimeError):
     pass
+
+
+class _Released(Exception):
+    """The reader released the device for idleness while a request was starting."""
 
 
 @dataclass
@@ -126,10 +140,13 @@ class Grabber:
         self._stop = threading.Event()
         self._open_lock = threading.Lock()
         self._cond = threading.Condition()
-        self._want = 0              # pending decode requests
-        self._seq = 0
         self._frame: np.ndarray | None = None
-        self._frame_t = 0.0
+        self._frame_t = 0.0         # wall time the latest read finished
+        self._frame_start = 0.0     # wall time the latest read started
+        self._frame_waited = False  # did that read block for a new frame (vs. return a buffered one)?
+        self._reads = 0
+        self._active_until = 0.0    # monotonic; reader decodes continuously until then
+        self._wake = threading.Event()
         self._last_use = time.monotonic()
         self._opened_at = 0.0
         self.status = "closed"      # closed | open | reconnecting | error
@@ -192,6 +209,7 @@ class Grabber:
     def _start(self, dev: devices.DeviceInfo, cap: cv2.VideoCapture, source: str) -> None:
         self.device, self._cap, self.source = dev, cap, source
         self.status, self.last_error = "open", ""
+        self._last_use = time.monotonic()  # opening can take seconds; that is not idle time
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="capture-reader", daemon=True)
         self._thread.start()
@@ -200,6 +218,7 @@ class Grabber:
     def close(self) -> None:
         with self._open_lock:
             self._stop.set()
+            self._wake.set()
             t = self._thread
             if t and t.is_alive() and t is not threading.current_thread():
                 t.join(timeout=3)
@@ -256,14 +275,19 @@ class Grabber:
                     backoff = min(backoff * 2, 5)
                 continue
 
-            if self.cfg.idle_release_s > 0 and time.monotonic() - self._last_use > self.cfg.idle_release_s:
-                log.info("idle for %ss, releasing device", self.cfg.idle_release_s)
-                cap.release()
-                self._cap = None
-                self.status = "closed"
+            if self._release_if_idle(cap):
                 return
 
-            if not cap.grab():
+            if time.monotonic() >= self._active_until:
+                # Idle: no decoding. Wake up on a request, or time out and do one health-check read.
+                if self._wake.wait(IDLE_CHECK_S):
+                    self._wake.clear()
+                    continue
+
+            t_start = time.monotonic()
+            t_start_wall = time.time()
+            ok, img = cap.read()
+            if not ok or img is None:
                 fails += 1
                 if fails >= FAILS_BEFORE_RECONNECT:
                     log.warning("capture lost, reconnecting")
@@ -275,28 +299,53 @@ class Grabber:
                     time.sleep(0.03)
                 continue
             fails = 0
-            t = time.time()
+            spent = time.monotonic() - t_start
+            fps = self.actual.get("fps") or self.cfg.fps or 30
             with self._cond:
-                want = self._want
-            if want:
-                ok, img = cap.retrieve()
-                if ok and img is not None:
-                    with self._cond:
-                        self._frame, self._frame_t = img, t
-                        self._seq += 1
-                        self._want = 0
-                        self._cond.notify_all()
+                self._frame, self._frame_t, self._frame_start = img, time.time(), t_start_wall
+                # A read that returns almost instantly handed back a frame that was already buffered
+                # (possibly from long ago); one that blocked waited for the camera's next frame.
+                self._frame_waited = spent >= 0.3 / fps
+                self._reads += 1
+                self._cond.notify_all()
+            # never spin faster than the frame rate on backends that do not block
+            min_interval = 0.5 / fps
+            if spent < min_interval:
+                time.sleep(min_interval - spent)
+
+    def _release_if_idle(self, cap: cv2.VideoCapture) -> bool:
+        """An open device keeps the driver decoding (DirectShow: ~50% of a core at 1080p), so give it
+        back after idle_release_s. Decided under the same lock a request takes, so a request can never
+        slip in between the decision and the release unnoticed."""
+        if self.cfg.idle_release_s <= 0:
+            return False
+        with self._cond:
+            now = time.monotonic()
+            if now < self._active_until or now - self._last_use <= self.cfg.idle_release_s:
+                return False
+            log.info("idle for %ss, releasing device", self.cfg.idle_release_s)
+            cap.release()
+            self._cap = None
+            self.status = "closed"
+            self._cond.notify_all()
+            return True
 
     # ------------------------------------------------------------ public API
 
     def get_frame(self, timeout: float = 4.0) -> Frame:
-        """Return a frame grabbed after this call started."""
-        self._last_use = time.monotonic()
-        if self._cap is None or not (self._thread and self._thread.is_alive()):
-            if self.status in ("reconnecting",) and self._thread and self._thread.is_alive():
-                raise CaptureError(f"Capture device disconnected, reconnecting... ({self.last_error})")
-            self.open()
-        frame = self._fetch(timeout)
+        """Return a frame read after this call started (at most one frame interval old)."""
+        for _ in range(2):
+            if self._cap is None or not (self._thread and self._thread.is_alive()):
+                if self.status == "reconnecting" and self._thread and self._thread.is_alive():
+                    raise CaptureError(f"Capture device disconnected, reconnecting... ({self.last_error})")
+                self.open()
+            try:
+                frame = self._fetch(timeout)
+                break
+            except _Released:
+                continue  # released for idleness just as we asked: reopen once
+        else:
+            raise CaptureError("Could not get a frame from the capture card: device was released while reading")
         # Right after opening, cards (and webcams) deliver black frames while locking onto the signal;
         # retry briefly instead of telling the model "no signal".
         while frame.signal != "OK" and time.monotonic() - self._opened_at < WARMUP_S:
@@ -306,9 +355,27 @@ class Grabber:
 
     def _fetch(self, timeout: float) -> Frame:
         with self._cond:
-            start_seq = self._seq
-            self._want += 1
-            ok = self._cond.wait_for(lambda: self._seq > start_seq or self._stop.is_set(), timeout)
+            if self._cap is None and self.status == "closed":
+                raise _Released
+            t_request = time.time()
+            reads_before = self._reads
+            self._last_use = time.monotonic()
+            self._active_until = self._last_use + ACTIVE_S
+            self._wake.set()
+
+            def released() -> bool:
+                return self._cap is None and self.status == "closed"
+
+            def fresh() -> bool:
+                if self._stop.is_set() or released():
+                    return True
+                if self._frame_start < t_request:
+                    return False
+                return self._frame_waited or self._reads - reads_before >= FRESH_FALLBACK_READS
+
+            ok = self._cond.wait_for(fresh, timeout)
+            if released() and not self._stop.is_set():
+                raise _Released
             img, t = self._frame, self._frame_t
         if not ok or img is None:
             msg = self.last_error or "no frame received in time"

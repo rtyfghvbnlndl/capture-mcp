@@ -47,7 +47,7 @@ class Config:
     grid_rows: int = 5
     autocrop: bool = True       # crop letterbox black borders
     save_dir: str = ""          # save every returned image here (debugging)
-    idle_release_s: int = 0     # release device after N idle seconds; 0 = never
+    idle_release_s: int = 60    # release device after N idle seconds (an open device costs CPU); 0 = never
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -65,7 +65,7 @@ class Config:
             grid_rows=rows,
             autocrop=_bool("CAPTURE_AUTOCROP", True),
             save_dir=os.environ.get("CAPTURE_SAVE_DIR", "").strip(),
-            idle_release_s=_int("CAPTURE_IDLE_RELEASE_S", 0),
+            idle_release_s=_int("CAPTURE_IDLE_RELEASE_S", 60),
         )
 
     def detail_size(self, detail: str) -> int:

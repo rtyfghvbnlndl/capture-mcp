@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "capture-mcp"
-version = "0.1.0"
+version = "0.1.1"
 readme = "README.md"
 description = "MCP server that exposes a USB HDMI capture card (UVC camera) as a screen for vision LLMs"
 requires-python = ">=3.10"
