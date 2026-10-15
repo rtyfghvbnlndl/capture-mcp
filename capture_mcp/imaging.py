@@ -1,6 +1,7 @@
 """Pure image helpers: region parsing, grid overlay, letterbox crop, change detection, encoding.
 
-Everything here works on numpy BGR frames and has no device dependency, so it is unit-testable.
+Everything here works on numpy RGB frames (Pillow + numpy, no OpenCV) and has no device dependency,
+so it is unit-testable.
 
 Coordinate convention used everywhere a model can see it:
   * grid cells: columns are letters A.., rows are numbers 1.. ("C3"), ranges "B2:D4"
@@ -10,12 +11,14 @@ Internally a Region stores fractions 0..1.
 
 from __future__ import annotations
 
+import io
 import re
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-import cv2
 import numpy as np
+import av
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 REGION_HELP = (
     'Examples: "C3" (one grid cell), "B2:D4" (cell range), '
@@ -168,45 +171,76 @@ def crop(frame: np.ndarray, r: Region) -> np.ndarray:
     return frame[y1:y2, x1:x2]
 
 
+def _pil(img: np.ndarray) -> Image.Image:
+    return Image.fromarray(np.ascontiguousarray(img))
+
+
+def scale(img: np.ndarray, w: int, h: int, interp: str = "AREA", gray: bool = False) -> np.ndarray:
+    """Resize (and optionally convert to gray) with FFmpeg's swscale: SIMD-optimised, ~3.5x faster than
+    Pillow for the same filter, which matters on low-power CPUs."""
+    src = np.ascontiguousarray(img)
+    w, h = max(1, w), max(1, h)
+    try:
+        frame = av.VideoFrame.from_ndarray(src, format="rgb24" if src.ndim == 3 else "gray")
+        out = frame.reformat(width=w, height=h, format="gray" if gray else frame.format.name, interpolation=interp)
+        return out.to_ndarray()
+    except Exception:  # swscale rejects some tiny/odd sizes; Pillow handles anything
+        p = _pil(src).convert("L") if gray and src.ndim == 3 else _pil(src)
+        return np.asarray(p.resize((w, h), Image.Resampling.LANCZOS))
+
+
+def _gray(img: np.ndarray) -> np.ndarray:
+    return scale(img, img.shape[1], img.shape[0], "POINT", gray=True) if img.ndim == 3 else img
+
+
 def fit_long_side(img: np.ndarray, long_side: int, max_upscale: float = 1.0) -> np.ndarray:
     h, w = img.shape[:2]
-    scale = long_side / max(w, h)
-    scale = min(scale, max_upscale)
-    if abs(scale - 1.0) < 1e-3:
+    factor = min(long_side / max(w, h), max_upscale)
+    if abs(factor - 1.0) < 1e-3:
         return img
-    nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
-    return cv2.resize(img, (nw, nh), interpolation=interp)
+    nw, nh = max(1, int(round(w * factor))), max(1, int(round(h * factor)))
+    # Lanczos keeps thin UI text legible when shrinking; bicubic when enlarging zoomed crops
+    return scale(img, nw, nh, "LANCZOS" if factor < 1 else "BICUBIC")
+
+
+def _font(px: int):
+    try:
+        return ImageFont.load_default(size=px)
+    except TypeError:  # Pillow < 10.1 has only the fixed bitmap font
+        return ImageFont.load_default()
 
 
 def draw_grid(img: np.ndarray, cols: int, rows: int) -> np.ndarray:
-    """Semi-transparent grid lines plus a high-contrast label in each cell's top-left corner."""
-    out = img.copy()
+    """Semi-transparent grid lines plus a translucent label in each cell's top-left corner
+    (translucent so labels do not completely hide text underneath; zoom has no grid anyway)."""
+    # Blends only the line and label pixels (a full-image alpha composite was the slowest step).
+    out = np.array(img, dtype=np.uint8, copy=True)
     h, w = out.shape[:2]
-    overlay = out.copy()
+    yellow = np.array([255, 255, 0], np.float32)
+
+    def blend(region: np.ndarray, color: np.ndarray, alpha: float) -> None:
+        region[...] = (region * (1 - alpha) + color * alpha).astype(np.uint8)
+
     thick = max(1, round(min(w, h) / 600))
     for c in range(1, cols):
         x = round(c * w / cols)
-        cv2.line(overlay, (x, 0), (x, h - 1), (0, 255, 255), thick)
+        blend(out[:, x:x + thick], yellow, 0.55)
     for r in range(1, rows):
         y = round(r * h / rows)
-        cv2.line(overlay, (0, y), (w - 1, y), (0, 255, 255), thick)
-    cv2.addWeighted(overlay, 0.55, out, 0.45, 0, out)
-
-    # Labels are translucent so they do not completely hide text underneath (zoom has no grid anyway).
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    fscale = max(0.35, min(w, h) / 1300)
-    fthick = max(1, round(fscale * 2))
-    labels = out.copy()
+        blend(out[y:y + thick, :], yellow, 0.55)
+    font = _font(max(11, round(min(w, h) / 40)))
+    measure = ImageDraw.Draw(Image.new("L", (1, 1)))
     for r in range(rows):
         for c in range(cols):
             label = cell_name(c, r)
-            (tw, th), base = cv2.getTextSize(label, font, fscale, fthick)
-            x0 = round(c * w / cols) + 2
-            y0 = round(r * h / rows) + 2
-            cv2.rectangle(labels, (x0, y0), (x0 + tw + 4, y0 + th + base + 3), (0, 0, 0), -1)
-            cv2.putText(labels, label, (x0 + 2, y0 + th + 2), font, fscale, (0, 255, 255), fthick, cv2.LINE_AA)
-    cv2.addWeighted(labels, 0.7, out, 0.3, 0, out)
+            x0, y0 = round(c * w / cols) + 2, round(r * h / rows) + 2
+            _, _, tx, ty = measure.textbbox((3, 1), label, font=font)
+            x1, y1 = min(w, x0 + tx + 4), min(h, y0 + ty + 4)
+            box = out[y0:y1, x0:x1]
+            blend(box, np.zeros(3, np.float32), 0.7)  # translucent dark box
+            patch = Image.fromarray(box)
+            ImageDraw.Draw(patch).text((3, 1), label, font=font, fill=(255, 255, 0))
+            out[y0:y1, x0:x1] = np.asarray(patch)
     return out
 
 
@@ -216,32 +250,29 @@ def contact_sheet(tiles: Sequence[tuple[np.ndarray | None, str]], tile_w: int = 
     cols = 1 if n == 1 else 2
     rows = (n + cols - 1) // cols
     bar = 34
-    sheet = np.full((rows * (tile_h + bar), cols * tile_w, 3), 40, np.uint8)
-    font = cv2.FONT_HERSHEY_SIMPLEX
+    sheet = Image.new("RGB", (cols * tile_w, rows * (tile_h + bar)), (40, 40, 40))
+    d = ImageDraw.Draw(sheet)
+    font, big = _font(20), _font(22)
     for i, (img, label) in enumerate(tiles):
         x0 = (i % cols) * tile_w
         y0 = (i // cols) * (tile_h + bar)
-        cv2.rectangle(sheet, (x0, y0), (x0 + tile_w - 1, y0 + bar - 1), (0, 0, 0), -1)
-        cv2.putText(sheet, label[:40], (x0 + 8, y0 + 24), font, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+        d.rectangle([x0, y0, x0 + tile_w - 1, y0 + bar - 1], fill=(0, 0, 0))
+        d.text((x0 + 8, y0 + 6), label[:40], font=font, fill=(255, 255, 0))
         area_y = y0 + bar
         if img is None:
-            cv2.putText(sheet, "no picture", (x0 + 150, area_y + tile_h // 2), font, 0.8, (180, 180, 180), 2, cv2.LINE_AA)
+            d.text((x0 + 170, area_y + tile_h // 2 - 12), "no picture", font=big, fill=(180, 180, 180))
         else:
-            th = fit_long_side(img, tile_w, max_upscale=1.0)
-            if th.shape[0] > tile_h:
-                th = cv2.resize(th, (round(th.shape[1] * tile_h / th.shape[0]), tile_h), interpolation=cv2.INTER_AREA)
-            h, w = th.shape[:2]
-            ox, oy = x0 + (tile_w - w) // 2, area_y + (tile_h - h) // 2
-            sheet[oy:oy + h, ox:ox + w] = th
-        cv2.rectangle(sheet, (x0, y0), (x0 + tile_w - 1, area_y + tile_h - 1), (90, 90, 90), 1)
-    return sheet
+            th = _pil(img)
+            th.thumbnail((tile_w, tile_h), Image.Resampling.BILINEAR, reducing_gap=2.0)
+            sheet.paste(th, (x0 + (tile_w - th.width) // 2, area_y + (tile_h - th.height) // 2))
+        d.rectangle([x0, y0, x0 + tile_w - 1, area_y + tile_h - 1], outline=(90, 90, 90))
+    return np.asarray(sheet)
 
 
 def encode_jpeg(img: np.ndarray, quality: int) -> bytes:
-    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
-    if not ok:
-        raise RuntimeError("JPEG encoding failed")
-    return buf.tobytes()
+    buf = io.BytesIO()
+    _pil(img).save(buf, "JPEG", quality=int(quality))
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------- frame analysis
@@ -253,7 +284,7 @@ def letterbox_box(frame: np.ndarray, black: int = 24, tol: float = 0.02) -> tupl
     which would silently shift the coordinate system between screenshots.
     """
     h, w = frame.shape[:2]
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    gray = _gray(frame)
     rows_dark = gray.max(axis=1) < black
     cols_dark = gray.max(axis=0) < black
     if rows_dark.all():
@@ -279,16 +310,17 @@ def letterbox_box(frame: np.ndarray, black: int = 24, tol: float = 0.02) -> tupl
 
 
 def signal_state(frame: np.ndarray) -> tuple[str, str]:
-    """Classify a frame as OK or blank. Returns (state, human description)."""
+    """Classify an RGB frame as OK or blank. Returns (state, human description)."""
     if frame.ndim == 2:
-        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        frame = np.repeat(frame[..., None], 3, axis=2)
     # Count pixels that differ clearly from the dominant color. A std-based test would also flag a
-    # mostly-white page with a single line of text as blank; this one only needs ~0.05% of pixels.
-    small = cv2.resize(frame, (480, 270), interpolation=cv2.INTER_AREA).astype(np.int16)
+    # mostly-white page with a single line of text as blank; this one only needs ~0.02% of pixels
+    # (about one short word at 1080p): calling real content "no signal" is the worse mistake.
+    small = scale(frame, 480, 270, "AREA").astype(np.int16)
     med = np.median(small.reshape(-1, 3), axis=0)
     deviating = float((np.abs(small - med).max(axis=2) > 12).mean())
-    if deviating < 0.0005:
-        b, g, r = (int(v) for v in med)
+    if deviating < 0.0002:
+        r, g, b = (int(v) for v in med)
         mean = (r + g + b) / 3
         if mean < 20:
             desc = "screen is completely black"
@@ -296,6 +328,14 @@ def signal_state(frame: np.ndarray) -> tuple[str, str]:
             desc = f"screen is a single flat color (RGB {r},{g},{b})"
         return "BLANK", desc + ": no HDMI signal, source monitor asleep/screensaver, or capture card idle screen"
     return "OK", "signal OK"
+
+
+def diff_prep(f: np.ndarray) -> np.ndarray:
+    """Small blurred grayscale version of a frame for change detection (compute once per frame)."""
+    h, w = f.shape[:2]
+    k = 320 / max(w, h)
+    g = scale(f, round(w * k), round(h * k), "AREA", gray=True)
+    return np.asarray(Image.fromarray(g).filter(ImageFilter.GaussianBlur(0.8))).astype(np.int16)
 
 
 def diff_ratio(a: np.ndarray, b: np.ndarray, r: Region = FULL, pixel_thresh: int = 12) -> tuple[float, Region | None]:
@@ -306,18 +346,16 @@ def diff_ratio(a: np.ndarray, b: np.ndarray, r: Region = FULL, pixel_thresh: int
     """
     if a.shape != b.shape:
         return 1.0, FULL
+    return diff_prepped(diff_prep(a), diff_prep(b), r, pixel_thresh)
 
-    def prep(f: np.ndarray) -> np.ndarray:
-        g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
-        h, w = g.shape
-        scale = 320 / max(w, h)
-        g = cv2.resize(g, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_AREA)
-        return cv2.GaussianBlur(g, (3, 3), 0)
 
-    ga, gb = prep(a), prep(b)
+def diff_prepped(ga: np.ndarray, gb: np.ndarray, r: Region = FULL, pixel_thresh: int = 12) -> tuple[float, Region | None]:
+    """diff_ratio on outputs of diff_prep, so a baseline frame is prepared only once."""
+    if ga.shape != gb.shape:
+        return 1.0, FULL
     h, w = ga.shape
     x1, y1, x2, y2 = r.to_pixels(w, h)
-    mask = cv2.absdiff(ga, gb)[y1:y2, x1:x2] > pixel_thresh
+    mask = np.abs(ga - gb)[y1:y2, x1:x2] > pixel_thresh
     if mask.size == 0:
         return 0.0, None
     ratio = float(mask.mean())

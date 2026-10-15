@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "capture-mcp"
-version = "0.1.2"
+version = "0.2.0"
 readme = "README.md"
 description = "MCP server that exposes a USB HDMI capture card (UVC camera) as a screen for vision LLMs"
 requires-python = ">=3.10"
@@ -13,12 +13,13 @@ authors = [{ name = "zumg" }]
 
 dependencies = [
     "mcp>=1.10",
-    "opencv-python-headless>=4.8",
+    "av>=12",
+    "pillow>=10.1",
     "numpy",
 ]
 
 [project.optional-dependencies]
-enum = ["cv2-enumerate-cameras"]
+enum = []  # device names now come from FFmpeg; kept so old "[enum]" install commands still work
 ocr = ["rapidocr", "onnxruntime"]
 dev = ["pytest"]
 

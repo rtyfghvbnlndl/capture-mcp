@@ -113,17 +113,17 @@ def test_signal_state():
     state, desc = imaging.signal_state(np.zeros((1080, 1920, 3), np.uint8))
     assert state == "BLANK" and "black" in desc
     blue = np.zeros((1080, 1920, 3), np.uint8)
-    blue[..., 0] = 200  # BGR: capture-card "no signal" blue screen
+    blue[..., 2] = 200  # RGB: capture-card "no signal" blue screen
     state, desc = imaging.signal_state(blue)
     assert state == "BLANK" and "RGB 0,0,200" in desc
 
 
 def test_mostly_white_page_is_not_blank():
-    import cv2
+    from PIL import Image, ImageDraw, ImageFont
 
-    page = np.full((1080, 1920, 3), 255, np.uint8)  # near-empty editor: one short line of text
-    cv2.putText(page, "hello world", (40, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
-    assert imaging.signal_state(page)[0] == "OK"
+    img = Image.new("RGB", (1920, 1080), (255, 255, 255))  # near-empty editor: one short line of text
+    ImageDraw.Draw(img).text((40, 70), "hello world", fill=(0, 0, 0), font=ImageFont.load_default(size=16))
+    assert imaging.signal_state(np.asarray(img))[0] == "OK"
 
 
 def test_black_with_noise_is_blank():
@@ -173,7 +173,7 @@ from capture_mcp import devices  # noqa: E402
 
 
 def _dev(i, name, path="", vid=0, pid=0):
-    return devices.DeviceInfo(i, name, 700, path=path, vid=vid, pid=pid)
+    return devices.DeviceInfo(i, name, "dshow", path=path, vid=vid, pid=pid)
 
 
 def test_kind_guess():
@@ -184,9 +184,9 @@ def test_kind_guess():
 
 def test_auto_pick_prefers_capture_card_and_refuses_webcam_only():
     devs = [_dev(0, "Integrated Camera"), _dev(1, "USB Video")]
-    assert devices.pick("", devs, 700).index == 1
+    assert devices.pick("", devs).index == 1
     with pytest.raises(LookupError, match="list_devices"):
-        devices.pick("", [_dev(0, "Integrated Camera")], 700)
+        devices.pick("", [_dev(0, "Integrated Camera")])
 
 
 def test_match_saved_survives_index_shift_and_duplicate_names():

@@ -194,17 +194,30 @@ async def wait_for_change(
     where = "screen" if r.is_full else f"region {imaging.region_to_cells(r, cfg.grid_cols, cfg.grid_rows)}"
     try:
         base = await _frame()
+        base_prep = None
         start = time.monotonic()
         while True:
             await anyio.sleep(0.3)
-            cur = await _frame()
+            # A byte-identical packet means an identical picture (HDMI is digital): the grabber then skips
+            # decoding entirely and returns None, so polling a static screen costs almost nothing.
+            cur_or_same = await anyio.to_thread.run_sync(lambda: grabber.get_frame(unless_digest=base.raw_digest))
             elapsed = time.monotonic() - start
+            if cur_or_same is None:
+                if elapsed >= timeout_s:
+                    return [_text(f"NO CHANGE: {where} did not change within {timeout_s:.0f}s.")]
+                continue
+            cur = cur_or_same
             if cur.signal != base.signal:
                 msg = (f"after {elapsed:.1f}s the screen became blank ({cur.signal_desc})" if cur.signal != "OK"
                        else f"after {elapsed:.1f}s the screen came back from blank")
                 break
             if cur.signal == "OK":
-                ratio, bbox = imaging.diff_ratio(base.image, cur.image, r)
+                if cur.image.shape != base.image.shape:
+                    ratio, bbox = 1.0, imaging.FULL
+                else:
+                    if base_prep is None:
+                        base_prep = imaging.diff_prep(base.image)  # once, not on every poll
+                    ratio, bbox = imaging.diff_prepped(base_prep, imaging.diff_prep(cur.image), r)
                 if ratio >= threshold:
                     area = imaging.region_to_cells(bbox, cfg.grid_cols, cfg.grid_rows) if bbox else "?"
                     msg = f"CHANGED: {where} changed after {elapsed:.1f}s ({ratio:.1%} of pixels), changed area ≈ {area}"
@@ -233,7 +246,7 @@ def _same(a: devices.DeviceInfo | None, b: devices.DeviceInfo) -> bool:
 def _fmt(actual: dict) -> str:
     if not actual:
         return ""
-    return f"{actual.get('width')}x{actual.get('height')} {actual.get('fourcc')} {actual.get('fps')}fps"
+    return f"{actual.get('width')}x{actual.get('height')} {actual.get('format')} {float(actual.get('fps') or 0):g}fps"
 
 
 @tool(description="List video devices and check which one shows the other computer (查找采集卡). preview=true adds one thumbnail image per device (this also opens webcams).")
@@ -241,7 +254,7 @@ async def list_devices(
     preview: Annotated[bool, Field(description="Return a thumbnail sheet of all devices, including webcams.")] = False,
 ) -> Content:
     def work():
-        devs = devices.list_devices(grabber.api)
+        devs = grabber.list_devices()
         running = grabber.status == "open" and grabber.device is not None
         lines, tiles = [], []
         for d in devs:
@@ -316,8 +329,8 @@ async def select_device(
         return [_text(f"switched to automatic selection: {grabber.device.label} ({grabber.source})")]
 
     def switch():
-        devs = devices.list_devices(grabber.api)
-        dev = devices.pick(spec, devs, grabber.api)
+        devs = grabber.list_devices()
+        dev = devices.pick(spec, devs)
         grabber.select(dev)
         return dev, grabber.get_frame()
 
@@ -400,7 +413,7 @@ if _OCR_CLS is not None:
         scale = 2.0 if max(part.shape[:2]) < 800 else 1.0  # small regions OCR better when enlarged
         img = imaging.fit_long_side(part, int(max(part.shape[:2]) * scale), max_upscale=2.0)
         t_ocr = time.monotonic()
-        items = await anyio.to_thread.run_sync(_run_ocr, img)
+        items = await anyio.to_thread.run_sync(_run_ocr, img[..., ::-1].copy())  # RapidOCR expects BGR
         t_ocr = time.monotonic() - t_ocr
         ih, iw = img.shape[:2]
         rows = []

@@ -14,7 +14,7 @@ EXTRAS="enum"
 [ -x "$VENV/bin/python" ] || "$PYTHON" -m venv "$VENV"
 PY="$VENV/bin/python"
 "$PY" -m pip install --disable-pip-version-check -q "$HERE[$EXTRAS]"
-"$PY" -c "import cv2, mcp, capture_mcp.server; print('import OK, OpenCV', cv2.__version__)"
+"$PY" -c "import av, mcp, capture_mcp.server; print('import OK, PyAV', av.__version__)"
 echo
 echo "Video devices:"
 "$PY" -m capture_mcp --list || true

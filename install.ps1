@@ -22,8 +22,8 @@ $major, $minor = $ver.Split(".") | ForEach-Object { [int]$_ }
 if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 10)) { throw "Python $ver is too old; need 3.10+." }
 Write-Host "Python $ver"
 
-# 2. Long venv paths break OpenCV's DLL loading on Windows ("filename or extension is too long").
-if ($Venv.Length -gt 80) { Write-Warning "Venv path is long ($($Venv.Length) chars); OpenCV may fail to load. Prefer a short path." }
+# 2. Very long venv paths can break DLL loading on Windows ("filename or extension is too long").
+if ($Venv.Length -gt 80) { Write-Warning "Venv path is long ($($Venv.Length) chars); native libraries may fail to load. Prefer a short path." }
 
 # 3. venv + package
 if (-not (Test-Path (Join-Path $Venv "Scripts\python.exe"))) {
@@ -38,7 +38,7 @@ Write-Host "Installing capture-mcp[$extras] ..."
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
 # 4. smoke test: imports + device list (does not open any camera)
-& $py -c "import cv2, mcp, capture_mcp.server; print('import OK, OpenCV', cv2.__version__)"
+& $py -c "import av, mcp, capture_mcp.server; print('import OK, PyAV', av.__version__)"
 if ($LASTEXITCODE -ne 0) { throw "import check failed" }
 Write-Host ""
 Write-Host "Video devices:"

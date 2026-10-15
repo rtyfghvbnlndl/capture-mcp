@@ -11,13 +11,13 @@
 **方式 A：解压后运行安装脚本（推荐）**
 
 ```powershell
-tar -xzf capture_mcp-0.1.2.tar.gz
-cd capture_mcp-0.1.2
+tar -xzf capture_mcp-0.2.0.tar.gz
+cd capture_mcp-0.2.0
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 ```sh
-tar -xzf capture_mcp-0.1.2.tar.gz && cd capture_mcp-0.1.2 && sh ./install.sh
+tar -xzf capture_mcp-0.2.0.tar.gz && cd capture_mcp-0.2.0 && sh ./install.sh
 ```
 
 - 安装位置：venv 默认建在 `~/.capture-mcp/venv`。
@@ -36,19 +36,19 @@ git clone https://github.com/rtyfghvbnlndl/capture-mcp && cd capture-mcp
 
 ```sh
 python -m venv ~/.capture-mcp/venv
-~/.capture-mcp/venv/bin/python -m pip install "capture-mcp[enum] @ git+https://github.com/rtyfghvbnlndl/capture-mcp"
+~/.capture-mcp/venv/bin/python -m pip install "capture-mcp @ git+https://github.com/rtyfghvbnlndl/capture-mcp"
 ```
 
 **方式 B：不解压，用 pip 直接安装压缩包**
 
 ```sh
 python -m venv ~/.capture-mcp/venv
-~/.capture-mcp/venv/bin/python -m pip install "capture_mcp-0.1.2.tar.gz[enum]"
+~/.capture-mcp/venv/bin/python -m pip install "capture_mcp-0.2.0.tar.gz"
 ```
 
 Windows 上把 `bin/python` 换成 `Scripts\python.exe`。
 
-**Windows 注意**：venv 路径要短。路径太深时，OpenCV 会报 `DLL load failed ... 文件名或扩展名太长`。
+**Windows 注意**：venv 路径要短。路径太深时，原生库可能报 `DLL load failed ... 文件名或扩展名太长`。
 
 **验证安装**：运行 `<venv python> -m capture_mcp --list`，应列出视频设备，并说明会用哪个设备、为什么。
 
@@ -105,7 +105,7 @@ Windows 上把 `bin/python` 换成 `Scripts\python.exe`。
 | `Cannot open video device` / `delivers no frames` | 设备被 OBS、相机应用或浏览器占用了。关掉这些程序再试 |
 | `No capture card recognized` | 采集卡没插好，或者驱动没把它识别成采集卡。用 `list_devices(preview=true)` 看画面，再用 `select_device` 手动选 |
 | `NO IMAGE: screen is completely black` | 另一台电脑没信号、在睡眠，或 HDMI 没插好 |
-| 1080p 很卡 | 看 `list_devices` 里的编码，应为 MJPG；如果不是，设置 `CAPTURE_BACKEND=msmf` 或降低分辨率 |
+| CPU 占用高（低功耗电脑） | 运行 `--probe` 看格式和 CPU。格式应为 `mjpeg`；采集卡不支持 MJPG 时只能收原始帧，可降低 `CAPTURE_WIDTH/HEIGHT` 或 `CAPTURE_FPS` |
 | 模型说看不到图 | 客户端可能没把工具返回的图片交给模型。设置 `CAPTURE_SAVE_DIR` 把图存下来排查 |
 | 安装时 pip 报 `SSLEOFError` / `UNEXPECTED_EOF_WHILE_READING` | 本机代理（`HTTPS_PROXY`）和 Python 的 TLS 不兼容。安装时临时清空代理：PowerShell 里先执行 `$env:HTTPS_PROXY=""; $env:HTTP_PROXY=""` 再运行安装脚本 |
 | 清空代理后 pip 装 `git+https://github.com/...` 报 `Failed to connect to github.com` | 只让 git 走代理、pip 不走：`$env:HTTPS_PROXY=""; $env:GIT_CONFIG_COUNT="1"; $env:GIT_CONFIG_KEY_0="http.proxy"; $env:GIT_CONFIG_VALUE_0="http://127.0.0.1:<代理端口>"`，再执行 pip install |

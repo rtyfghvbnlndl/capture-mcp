@@ -1,145 +1,192 @@
-"""Regression test: a screenshot must show the screen as it is *now*, not as it was at the previous call.
+"""Grabber behaviour against a fake device that streams real MJPG packets at 30 fps.
 
-OpenCV's DirectShow backend (the Windows default) keeps the first frame that arrives after the last
-retrieve() and drops every later frame until someone retrieves again; grab() does not wait at all.
-FakeDShowCap reproduces exactly that, with the frame number encoded in the pixels.
+Covers the bugs fixed so far: a screenshot must show the screen as it is *now* (not as it was at the
+previous call), the reader must not spin, a vanished stream must reconnect, and slow opens must not count
+as idle time.
 """
 
-import math
+import io
 import threading
 import time
+import zlib
 
 import numpy as np
 import pytest
+from PIL import Image
 
-from capture_mcp import camera, devices
+from capture_mcp import camera, devices, source
 from capture_mcp.config import Config
 
 FPS = 30.0
 
 
-class FakeDShowCap:
-    def __init__(self):
+class FakeCard:
+    """Produces one JPEG packet per frame interval; remembers when each packet was produced."""
+
+    def __init__(self, fail_after: int | None = None, static: bool = False):
         self.t0 = time.time()
-        self.last_retrieve = self.t0
-        self.lock = threading.Lock()
-        self.grabs = 0
+        self.produced = 0
+        self.born: dict[int, float] = {}  # crc32 of packet -> production time
+        self.fail_after = fail_after
+        self.static = static
+        self.opens = 0
         rng = np.random.default_rng(0)
-        self.base = rng.integers(40, 220, (180, 320, 3), dtype=np.uint8)  # non-blank picture
+        self.base = rng.integers(40, 220, (180, 320, 3), dtype=np.uint8)
 
-    def _frame(self, tick: int) -> np.ndarray:
+    def _jpeg(self, tick: int) -> bytes:
         img = self.base.copy()
-        img[0, 0, 0], img[0, 0, 1] = tick % 256, tick // 256
-        return img
+        if not self.static:
+            img[:16, :64] = (tick * 7) % 256  # changes the picture every frame
+            img[16:32, :64] = (tick // 37) % 256
+        buf = io.BytesIO()
+        Image.fromarray(img).save(buf, "JPEG", quality=90)
+        return buf.getvalue()
 
-    def grab(self):  # DirectShow: returns immediately, never waits for a frame
-        self.grabs += 1
-        return True
+    def packets(self):
+        n = 0
+        while True:
+            if self.fail_after is not None and n >= self.fail_after:
+                raise OSError("device unplugged")
+            due = self.t0 + (self.produced + 1) / FPS
+            delay = due - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            self.produced += 1
+            data = self._jpeg(self.produced)
+            self.born.setdefault(zlib.crc32(data), time.time())
+            n += 1
+            yield data
 
-    def retrieve(self):
-        with self.lock:
-            # first frame produced after the previous retrieve() is held; later ones were dropped
-            first = math.floor((self.last_retrieve - self.t0) * FPS) + 1
-            due = self.t0 + first / FPS
-            now = time.time()
-            if due > now:
-                time.sleep(due - now)
-            self.last_retrieve = time.time()
-            return True, self._frame(first)
+    def open(self, dev, cfg):
+        self.opens += 1
+        it = self.packets()
 
-    def read(self):
-        self.grab()
-        return self.retrieve()
+        class Container:
+            def close(self):
+                pass
 
-    def release(self):
-        pass
+        so = source.Opened(Container(), None, "mjpeg", "", 320, 180,
+                           {"width": 320, "height": 180, "fps": FPS, "format": "mjpeg", "backend": "fake"})
+        return camera.Opened(so, it, camera.Decoder("mjpeg", "", 320, 180), next(it))
 
 
-def frame_time(cap: FakeDShowCap, img: np.ndarray) -> float:
-    tick = int(img[0, 0, 0]) + 256 * int(img[0, 0, 1])
-    return cap.t0 + tick / FPS
+def make_grabber(monkeypatch, card: FakeCard, **cfg_overrides):
+    dev = devices.DeviceInfo(1, "USB Video", "fake", path="p1")
+    monkeypatch.setattr(source, "list_devices", lambda backend="auto": [dev])
+    monkeypatch.setattr(camera, "open_device", card.open)
+    cfg = Config.from_env()
+    cfg.autocrop = False
+    for k, v in cfg_overrides.items():
+        setattr(cfg, k, v)
+    g = camera.Grabber(cfg)
+    g.selected = dev
+    return g
 
 
 @pytest.fixture
-def grabber(monkeypatch):
-    cap = FakeDShowCap()
-    dev = devices.DeviceInfo(1, "USB Video", 700)
-    monkeypatch.setattr(devices, "list_devices", lambda api, probe_fallback=True: [dev])
-    monkeypatch.setattr(camera, "open_capture", lambda d, cfg: (cap, {"width": 320, "height": 180}))
-    cfg = Config.from_env()
-    cfg.autocrop = False
-    g = camera.Grabber(cfg)
-    g.selected = dev
-    yield g, cap
+def card_and_grabber(monkeypatch):
+    card = FakeCard()
+    g = make_grabber(monkeypatch, card)
+    yield card, g
     g.close()
 
 
-def test_frame_is_fresh_after_idle(grabber):
-    g, cap = grabber
+def test_frame_is_fresh_after_idle(card_and_grabber):
+    card, g = card_and_grabber
     g.get_frame()
     for _ in range(3):
         time.sleep(0.5)  # the model looks at the image, thinks, then asks again
         t_request = time.time()
         f = g.get_frame()
-        # the frame must have been captured after the request (allow one frame interval of slack)
-        assert frame_time(cap, f.image) >= t_request - 1.5 / FPS, (
-            f"stale frame: captured {t_request - frame_time(cap, f.image):.2f}s before the request"
-        )
+        born = card.born[f.raw_digest]
+        assert born >= t_request, f"stale frame: produced {t_request - born:.2f}s before the request"
 
 
-def test_reader_does_not_busy_spin(grabber):
-    g, cap = grabber
+def test_reader_paced_by_device_not_spinning(card_and_grabber):
+    card, g = card_and_grabber
     g.get_frame()
-    before = cap.grabs
-    time.sleep(0.5)
-    # a reader paced by real frames makes ~15 calls in 0.5s; a spinning one makes hundreds of thousands
-    assert cap.grabs - before < 200
-
-
-def test_idle_reader_stops_decoding_and_still_returns_fresh_frames(grabber, monkeypatch):
-    g, cap = grabber
-    monkeypatch.setattr(camera, "ACTIVE_S", 0.3)
-    g.get_frame()
-    time.sleep(0.5)  # let the active window expire
-    before = cap.grabs
+    before = card.produced
     time.sleep(1.0)
-    assert cap.grabs - before <= 1  # idle: at most a health-check read
-    t_request = time.time()
-    f = g.get_frame()
-    assert frame_time(cap, f.image) >= t_request - 1.5 / FPS
+    assert 20 <= card.produced - before <= 40  # ~30 packets/s, read as they come
 
 
-def test_idle_release_and_transparent_reopen(grabber, monkeypatch):
-    g, cap = grabber
-    monkeypatch.setattr(camera, "ACTIVE_S", 0.2)
-    monkeypatch.setattr(camera, "IDLE_CHECK_S", 0.1)
-    g.cfg.idle_release_s = 1
+def test_stream_loss_reconnects(monkeypatch):
+    card = FakeCard(fail_after=10)
+    g = make_grabber(monkeypatch, card)
+    try:
+        g.get_frame()
+        time.sleep(1.0)  # stream dies after 10 packets; reader reconnects
+        f = g.get_frame(timeout=5)
+        assert f.image is not None and card.opens >= 2
+    finally:
+        g.close()
+
+
+def test_identical_pictures_have_equal_digests(monkeypatch):
+    card = FakeCard(static=True)
+    g = make_grabber(monkeypatch, card)
+    try:
+        a, b = g.get_frame(), g.get_frame()
+        assert a.raw_digest == b.raw_digest and a.t_wall < b.t_wall
+    finally:
+        g.close()
+
+
+def test_device_stays_open_by_default(card_and_grabber):
+    card, g = card_and_grabber
     g.get_frame()
-    time.sleep(1.6)
-    assert g.status == "closed" and g._cap is None  # device released while idle
-    t_request = time.time()
-    f = g.get_frame()  # reopens on demand
-    assert g.status == "open"
-    assert frame_time(cap, f.image) >= t_request - 1.5 / FPS
+    time.sleep(1.5)
+    assert g.status == "open" and card.opens == 1
+
+
+def test_optional_idle_release_and_reopen(monkeypatch):
+    card = FakeCard()
+    g = make_grabber(monkeypatch, card, idle_release_s=1)
+    try:
+        g.get_frame()
+        time.sleep(1.6)
+        assert g.status == "closed"
+        t_request = time.time()
+        f = g.get_frame()
+        assert g.status == "open" and card.born[f.raw_digest] >= t_request
+    finally:
+        g.close()
 
 
 def test_slow_open_is_not_mistaken_for_idleness(monkeypatch):
-    """Opening a webcam can take ~6s; that must not count as idle time and release the device."""
-    cap = FakeDShowCap()
-    dev = devices.DeviceInfo(1, "USB Video", 700)
+    card = FakeCard()
+    fast_open = card.open
 
-    def slow_open(d, cfg):
+    def slow_open(dev, cfg):
         time.sleep(1.5)
-        return cap, {"width": 320, "height": 180}
+        return fast_open(dev, cfg)
 
-    monkeypatch.setattr(devices, "list_devices", lambda api, probe_fallback=True: [dev])
-    monkeypatch.setattr(camera, "open_capture", slow_open)
-    cfg = Config.from_env()
-    cfg.autocrop, cfg.idle_release_s = False, 1
-    g = camera.Grabber(cfg)
-    g.selected = dev
+    g = make_grabber(monkeypatch, card, idle_release_s=1)
+    monkeypatch.setattr(camera, "open_device", slow_open)
     try:
         f = g.get_frame(timeout=3)
         assert f.image is not None and g.status == "open"
+    finally:
+        g.close()
+
+
+def test_decoder_handles_raw_nv12():
+    w, h = 64, 32
+    y = np.full((h, w), 128, np.uint8)
+    uv = np.full((h // 2, w), 128, np.uint8)
+    rgb = camera.Decoder("rawvideo", "nv12", w, h).decode(np.concatenate([y, uv]).tobytes())
+    assert rgb.shape == (h, w, 3) and abs(int(rgb.mean()) - 128) <= 2
+
+
+def test_unchanged_packet_skips_decoding(monkeypatch):
+    card = FakeCard(static=True)
+    g = make_grabber(monkeypatch, card)
+    try:
+        base = g.get_frame()
+        calls = []
+        real = camera.Decoder.decode
+        monkeypatch.setattr(camera.Decoder, "decode", lambda self, p: calls.append(1) or real(self, p))
+        assert g.get_frame(unless_digest=base.raw_digest) is None
+        assert calls == []  # identical packet: never decoded
     finally:
         g.close()

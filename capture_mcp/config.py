@@ -33,14 +33,26 @@ def _grid(raw: str) -> tuple[int, int]:
     return max(1, min(cols, 26)), max(1, min(rows, 20))
 
 
+_FOURCC_TO_FORMAT = {"MJPG": "mjpeg", "YUY2": "yuyv422", "YUYV": "yuyv422", "NV12": "nv12", "UYVY": "uyvy422"}
+
+
+def _format() -> str:
+    raw = os.environ.get("CAPTURE_FORMAT", "").strip().lower()
+    if raw:
+        return raw
+    # CAPTURE_FOURCC from 0.1.x still works
+    fourcc = os.environ.get("CAPTURE_FOURCC", "").strip().upper()
+    return _FOURCC_TO_FORMAT.get(fourcc, "auto")
+
+
 @dataclass
 class Config:
     device: str = ""            # index ("1") or name substring ("USB Video"); empty = auto
-    backend: str = "auto"       # auto | dshow | msmf | v4l2 | any
+    backend: str = "auto"       # auto | dshow | v4l2 | avfoundation
     width: int = 1920
     height: int = 1080
     fps: int = 30
-    fourcc: str = "MJPG"        # empty = leave driver default
+    format: str = "auto"        # auto (mjpeg > nv12 > other raw) | mjpeg | nv12 | yuyv422 | ...
     max_side: int = 1280        # default long side of returned images ("normal")
     jpeg_quality: int = 80
     grid_cols: int = 8
@@ -59,7 +71,7 @@ class Config:
             width=_int("CAPTURE_WIDTH", 1920),
             height=_int("CAPTURE_HEIGHT", 1080),
             fps=_int("CAPTURE_FPS", 30),
-            fourcc=os.environ.get("CAPTURE_FOURCC", "MJPG").strip().upper()[:4],
+            format=_format(),
             max_side=_int("CAPTURE_MAX_SIDE", 1280),
             jpeg_quality=max(30, min(_int("CAPTURE_JPEG_QUALITY", 80), 95)),
             grid_cols=cols,
