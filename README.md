@@ -110,7 +110,7 @@ C:\venvs\capmcp\Scripts\python -m capture_mcp --probe
 | `CAPTURE_GRID` | 8x5 | 网格列x行（列用字母，最多 26） |
 | `CAPTURE_AUTOCROP` | 1 | 自动裁掉**左右/上下对称**的黑边（源分辨率比例不同时） |
 | `CAPTURE_SAVE_DIR` | 空 | 把每张返回给模型的图存下来，排查"模型到底看到了什么" |
-| `CAPTURE_IDLE_RELEASE_S` | 60 | 空闲 N 秒后释放设备：设备开着时驱动会持续解码（DirectShow 1080p 约占半个 CPU 核），释放后 OBS 等程序也能用。下次截图自动重新打开（多 1–3 秒）。0=不释放 |
+| `CAPTURE_IDLE_RELEASE_S` | 0 | 空闲 N 秒后释放设备，0=从不释放。**采集卡保持 0**：释放后另一台电脑可能认为显示器被拔掉而反复调整显示。只在用普通摄像头、或想让 OBS 等程序接手设备时才设置 |
 
 ## 给小模型的系统提示词（建议放进客户端的 system prompt）
 
@@ -143,5 +143,5 @@ C:\venvs\capmcp\Scripts\python -m capture_mcp --probe
 - **选错设备**：让模型调用 `list_devices` / `select_device`；或者在客户端配置里写死 `CAPTURE_DEVICE`。
 - **1080p 很卡**：确认 `list_devices` 里 fourcc 是 MJPG；不是的话换 `CAPTURE_BACKEND=msmf` 或降分辨率。
 - **画面四周有黑边 / 坐标偏**：确认 `CAPTURE_AUTOCROP=1`；或把源电脑分辨率设为与采集分辨率同比例（16:9）。
-- **首次调用慢**：首次调用、或空闲超过 `CAPTURE_IDLE_RELEASE_S` 后的第一次调用才打开设备（Windows 上 1–6 秒），之后很快。想一直保持打开就设为 0。
+- **首次调用慢**：首次调用才打开设备（Windows 上 1–6 秒），之后设备一直保持打开，截图很快。
 - **read_text 慢**：rapidocr 在 CPU 上每次约 5–10 秒（实测与图片大小关系不大），第一次还要加载模型。它是可选的，平时优先用 zoom；只在需要逐字准确（数字、代码）时用。
