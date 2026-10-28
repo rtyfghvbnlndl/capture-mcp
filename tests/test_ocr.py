@@ -141,3 +141,13 @@ def test_real_engine_reads_layout(name):
         assert any(" | " in l for l in rd.lines)
     if name == "dialog":
         assert rd.graphics  # the picture is reported as a non-text area
+
+
+def test_ocr_extras_include_what_ocr_test_imports():
+    import pathlib
+    import tomllib
+
+    extras = tomllib.loads((pathlib.Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["optional-dependencies"]
+    for name in ("ocr", "ocr-rapid"):  # --ocr-test (run by the installers) renders with Pillow
+        assert any(d.split(";")[0].strip().lower().startswith("pillow") for d in extras[name]), name

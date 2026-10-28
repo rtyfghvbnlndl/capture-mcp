@@ -11,13 +11,13 @@
 **方式 A：解压后运行安装脚本（推荐）**
 
 ```powershell
-tar -xzf capture_mcp-0.1.2.tar.gz
-cd capture_mcp-0.1.2
+tar -xzf capture_mcp-0.1.4.tar.gz
+cd capture_mcp-0.1.4
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 ```sh
-tar -xzf capture_mcp-0.1.2.tar.gz && cd capture_mcp-0.1.2 && sh ./install.sh
+tar -xzf capture_mcp-0.1.4.tar.gz && cd capture_mcp-0.1.4 && sh ./install.sh
 ```
 
 - 安装位置：venv 默认建在 `~/.capture-mcp/venv`。
@@ -45,7 +45,7 @@ python -m venv ~/.capture-mcp/venv
 
 ```sh
 python -m venv ~/.capture-mcp/venv
-~/.capture-mcp/venv/bin/python -m pip install "capture_mcp-0.1.2.tar.gz[enum]"
+~/.capture-mcp/venv/bin/python -m pip install "capture_mcp-0.1.4.tar.gz[enum]"
 ```
 
 Windows 上把 `bin/python` 换成 `Scripts\python.exe`。

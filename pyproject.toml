@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "capture-mcp"
-version = "0.1.3"
+version = "0.1.4"
 readme = "README.md"
 description = "MCP server that exposes a USB HDMI capture card (UVC camera) as a screen for vision LLMs"
 requires-python = ">=3.10"
@@ -27,11 +27,12 @@ ocr = [
     "winrt-Windows.Storage.Streams>=3; sys_platform == 'win32'",
     "winrt-Windows.Globalization>=3; sys_platform == 'win32'",
     "winrt-Windows.Foundation>=3; sys_platform == 'win32'",
+    "pillow",  # --ocr-test renders its test screen with it (RapidOCR pulls it in anyway)
     "rapidocr>=3; sys_platform != 'win32'",
     "onnxruntime; sys_platform != 'win32'",
 ]
 # RapidOCR on any platform (also on Windows, e.g. when the Windows OCR language pack is missing)
-ocr-rapid = ["rapidocr>=3", "onnxruntime"]
+ocr-rapid = ["rapidocr>=3", "onnxruntime", "pillow"]
 dev = ["pytest"]
 
 [project.scripts]
