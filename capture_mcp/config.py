@@ -17,6 +17,14 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name, "").strip().lower()
     if not raw:
@@ -49,6 +57,14 @@ class Config:
     save_dir: str = ""          # save every returned image here (debugging)
     idle_release_s: int = 0     # release device after N idle seconds; 0 = never. Keep 0 for capture cards:
                                 # releasing one can make the source PC think its display was unplugged
+    text_only: bool = False     # no image tools at all: for models without vision, read_screen only
+    ocr_engine: str = "auto"    # auto | windows | rapid | none
+    ocr_lang: str = ""          # Windows OCR language tag, e.g. "zh-Hans-CN"; empty = best installed
+    ocr_threads: int = 4        # RapidOCR CPU threads
+    ocr_scale: float = 1.25     # Windows OCR: enlarge before OCR (measured best accuracy/time trade-off)
+    ocr_det_size: int = 960     # RapidOCR: text detection on a screen scaled to this long side (0 = full); measured: same accuracy, ~2x faster
+    ocr_graphics: bool = True   # also report large non-text areas (images, charts)
+    text_max_chars: int = 8000  # cap on read_screen output
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -67,6 +83,14 @@ class Config:
             autocrop=_bool("CAPTURE_AUTOCROP", True),
             save_dir=os.environ.get("CAPTURE_SAVE_DIR", "").strip(),
             idle_release_s=_int("CAPTURE_IDLE_RELEASE_S", 0),
+            text_only=_bool("CAPTURE_TEXT_ONLY", False),
+            ocr_engine=os.environ.get("CAPTURE_OCR_ENGINE", "auto").strip().lower() or "auto",
+            ocr_lang=os.environ.get("CAPTURE_OCR_LANG", "").strip(),
+            ocr_threads=max(1, _int("CAPTURE_OCR_THREADS", min(4, os.cpu_count() or 4))),
+            ocr_scale=_float("CAPTURE_OCR_SCALE", 1.25),
+            ocr_det_size=_int("CAPTURE_OCR_DET_SIZE", 960),
+            ocr_graphics=_bool("CAPTURE_OCR_GRAPHICS", True),
+            text_max_chars=max(500, _int("CAPTURE_TEXT_MAX_CHARS", 8000)),
         )
 
     def detail_size(self, detail: str) -> int:

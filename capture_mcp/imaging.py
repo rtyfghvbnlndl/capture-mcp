@@ -330,6 +330,62 @@ def diff_ratio(a: np.ndarray, b: np.ndarray, r: Region = FULL, pixel_thresh: int
     return ratio, bbox
 
 
+def diff_prep(f: np.ndarray, size: int = 320) -> np.ndarray:
+    """Small blurred grayscale copy of a BGR frame for change detection."""
+    g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
+    h, w = g.shape
+    k = size / max(w, h)
+    g = cv2.resize(g, (max(1, round(w * k)), max(1, round(h * k))), interpolation=cv2.INTER_AREA)
+    return cv2.GaussianBlur(g, (3, 3), 0)
+
+
+def changed_boxes(pa: np.ndarray, pb: np.ndarray, pixel_thresh: int = 12, max_boxes: int = 12) -> list[Region] | None:
+    """Regions (fractions) that changed between two diff_prep() images; [] = unchanged, None = too
+    fragmented to treat as a few separate changes."""
+    if pa.shape != pb.shape:
+        return [FULL]
+    mask = (cv2.absdiff(pa, pb) > pixel_thresh).astype(np.uint8)
+    if not mask.any():
+        return []
+    k = max(5, round(mask.shape[1] / 64) | 1)  # ~30 screen px: merges the characters of a changed line
+    mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    h, w = mask.shape
+    boxes = [Region(x / w, y / h, (x + bw) / w, (y + bh) / h) for x, y, bw, bh, _ in stats[1:n]]
+    return boxes if len(boxes) <= max_boxes else None
+
+
+def graphic_regions(frame: np.ndarray, text_boxes: list[tuple[float, float, float, float]],
+                    max_n: int = 8) -> list[Region]:
+    """Large areas with visual detail but no text (images, charts, video, icons grids). BGR frame."""
+    H, W = frame.shape[:2]
+    k = 480 / max(W, H)
+    small = cv2.resize(frame, (max(1, round(W * k)), max(1, round(H * k))), interpolation=cv2.INTER_AREA)
+    edges = cv2.Canny(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 60, 160)
+    for x1, y1, x2, y2 in text_boxes:  # remove text (with a margin)
+        pad = 3
+        edges[max(0, int(y1 * k) - pad):int(y2 * k) + pad, max(0, int(x1 * k) - pad):int(x2 * k) + pad] = 0
+    blob = cv2.dilate(edges, np.ones((9, 9), np.uint8))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(blob, connectivity=8)
+    sh, sw = blob.shape
+    out = []
+    cell = 8
+    for x, y, bw, bh, area in stats[1:n]:
+        if bw * bh >= 0.01 * sw * sh and bw >= 0.06 * sw and bh >= 0.06 * sh:  # bigger than bars and buttons
+            # Pictures have detail spread over their whole inside; the outline of a box, bar or button (whose
+            # text was masked out above) has an empty inside. Skip the 5px dilation margin on every side.
+            ix1, iy1, ix2, iy2 = x + 5, y + 5, x + bw - 5, y + bh - 5
+            if ix2 - ix1 < cell or iy2 - iy1 < cell:
+                continue
+            e = edges[iy1:iy2, ix1:ix2] > 0
+            ch, cw = (iy2 - iy1) // cell, (ix2 - ix1) // cell
+            blocks = e[:ch * cell, :cw * cell].reshape(ch, cell, cw, cell).any(axis=(1, 3))
+            if blocks.mean() >= 0.5:
+                out.append((bw * bh, Region(x / sw, y / sh, (x + bw) / sw, (y + bh) / sh)))
+    out.sort(key=lambda t: -t[0])
+    return [r for _, r in out[:max_n]]
+
+
 def iter_lines(items: Iterable[str], limit: int) -> list[str]:
     out = []
     for i, s in enumerate(items):

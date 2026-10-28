@@ -22,7 +22,9 @@ tar -xzf capture_mcp-0.1.2.tar.gz && cd capture_mcp-0.1.2 && sh ./install.sh
 
 - 安装位置：venv 默认建在 `~/.capture-mcp/venv`。
 - 脚本做的事：安装依赖，检查导入，列出视频设备，最后把客户端配置写进同目录的 `mcp-config.json`。
-- 需要 OCR 工具（`read_text`）的话，加 `-Ocr`（Windows）或 `--ocr`（Linux/macOS）。
+- 需要读屏工具（`read_screen`，把屏幕读成带排版的文字）的话，加 `-Ocr`（Windows）或 `--ocr`（Linux/macOS）。
+- **模型不支持图片**（纯文字的端侧模型）：用 `-TextOnly` / `--text-only`，会装 OCR 并在生成的配置里加 `CAPTURE_TEXT_ONLY=1`。
+- 装了 OCR 后脚本会运行 `--ocr-test`：输出所用引擎、耗时和识别结果。
 
 **方式 A2：从 GitHub 克隆后运行安装脚本**
 
@@ -81,7 +83,7 @@ Windows 上把 `bin/python` 换成 `Scripts\python.exe`。
 | Cherry Studio | 设置 → MCP 服务器 → 添加，类型选 stdio |
 | 其他 | 填进该客户端的 `mcpServers` 配置 |
 
-**验证接入**：客户端里应该出现这些工具：`screenshot`、`zoom`、`wait_for_change`、`list_devices`、`select_device`。装了 OCR 的话还有 `read_text`。
+**验证接入**：客户端里应该出现这些工具：`screenshot`、`zoom`、`wait_for_change`、`list_devices`、`select_device`。装了 OCR 的话还有 `read_screen`。纯文字模式（`CAPTURE_TEXT_ONLY=1`）下没有 `screenshot` 和 `zoom`。
 
 ## 3. 让模型用得好
 
@@ -110,4 +112,6 @@ Windows 上把 `bin/python` 换成 `Scripts\python.exe`。
 | 安装时 pip 报 `SSLEOFError` / `UNEXPECTED_EOF_WHILE_READING` | 本机代理（`HTTPS_PROXY`）和 Python 的 TLS 不兼容。安装时临时清空代理：PowerShell 里先执行 `$env:HTTPS_PROXY=""; $env:HTTP_PROXY=""` 再运行安装脚本 |
 | 清空代理后 pip 装 `git+https://github.com/...` 报 `Failed to connect to github.com` | 只让 git 走代理、pip 不走：`$env:HTTPS_PROXY=""; $env:GIT_CONFIG_COUNT="1"; $env:GIT_CONFIG_KEY_0="http.proxy"; $env:GIT_CONFIG_VALUE_0="http://127.0.0.1:<代理端口>"`，再执行 pip install |
 | 摄像头/采集卡打开了但始终全黑 | Windows 设置 → 隐私和安全性 → 摄像头 → 允许桌面应用访问摄像头；笔记本摄像头还要检查物理遮挡片 |
+| `read_screen` 报 OCR 不可用 | Windows：装 `.[ocr]`，并在 设置 → 时间和语言 → 语言 里给中文/英文装上"光学字符识别"；Linux：装 `.[ocr]`（RapidOCR + onnxruntime） |
+| `read_screen` 错字多 | 运行 `<venv python> -m capture_mcp --probe --ocr` 看真实画面的识别结果；Windows 可试 `CAPTURE_OCR_SCALE=1.5` 或改用 RapidOCR（`.[ocr-rapid]` + `CAPTURE_OCR_ENGINE=rapid`） |
 | Linux 上没有设备 | 当前用户需要有 `/dev/video*` 的访问权限，一般加入 `video` 组即可 |

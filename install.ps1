@@ -2,7 +2,8 @@
   capture-mcp installer for Windows (PowerShell 5.1+).
 
   .\install.ps1                 # install to %USERPROFILE%\.capture-mcp\venv
-  .\install.ps1 -Ocr            # also install the optional OCR tool (read_text)
+  .\install.ps1 -Ocr            # also install read_screen (screen as text, uses the OCR built into Windows)
+  .\install.ps1 -TextOnly       # for models without vision: OCR + CAPTURE_TEXT_ONLY=1 in the client config
   .\install.ps1 -Venv C:\venvs\capmcp
 
   Prints the MCP client config at the end and writes it to mcp-config.json next to this script.
@@ -10,7 +11,8 @@
 param(
     [string]$Venv = (Join-Path $env:USERPROFILE ".capture-mcp\venv"),
     [string]$Python = "python",
-    [switch]$Ocr
+    [switch]$Ocr,
+    [switch]$TextOnly
 )
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -32,6 +34,7 @@ if (-not (Test-Path (Join-Path $Venv "Scripts\python.exe"))) {
     if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
 }
 $py = Join-Path $Venv "Scripts\python.exe"
+if ($TextOnly) { $Ocr = $true }
 $extras = if ($Ocr) { "enum,ocr" } else { "enum" }
 Write-Host "Installing capture-mcp[$extras] ..."
 & $py -m pip install --disable-pip-version-check -q "$here[$extras]"
@@ -44,9 +47,14 @@ Write-Host ""
 Write-Host "Video devices:"
 & $py -m capture_mcp --list
 Write-Host ""
+if ($Ocr) {
+    Write-Host "OCR self-test:"
+    & $py -m capture_mcp --ocr-test
+    Write-Host ""
+}
 
 # 5. client config
-$config = [ordered]@{ mcpServers = [ordered]@{ "capture-card" = [ordered]@{ command = $py; args = @("-m", "capture_mcp"); env = @{} } } }
+$config = [ordered]@{ mcpServers = [ordered]@{ "capture-card" = [ordered]@{ command = $py; args = @("-m", "capture_mcp"); env = $(if ($TextOnly) { [ordered]@{ CAPTURE_TEXT_ONLY = "1" } } else { @{} }) } } }
 $json = $config | ConvertTo-Json -Depth 5
 $out = Join-Path $here "mcp-config.json"
 [System.IO.File]::WriteAllText($out, $json, (New-Object System.Text.UTF8Encoding $false))

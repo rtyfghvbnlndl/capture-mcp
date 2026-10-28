@@ -23,11 +23,21 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="list video devices and exit")
     ap.add_argument("--probe", action="store_true", help="grab one frame to a file and print diagnostics")
     ap.add_argument("--out", default="probe.jpg", help="output file for --probe")
+    ap.add_argument("--ocr", action="store_true", help="with --probe: also print the frame as read_screen text")
+    ap.add_argument("--ocr-test", action="store_true", help="check the OCR engine on a generated image (no device)")
     args = ap.parse_args()
 
     # stdout belongs to the MCP protocol; all logs go to stderr.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+    if args.list or args.probe or args.ocr_test:
+        try:  # diagnostics print Chinese text and box characters; never crash on a legacy console codepage
+            sys.stdout.reconfigure(errors="replace")
+        except Exception:
+            pass
+    if args.ocr_test:
+        _ocr_test()
+        return
     if args.list or args.probe:
         _diagnose(args)
         return
@@ -88,6 +98,73 @@ def _diagnose(args) -> None:
     grid_path = f"{root}_grid{ext or '.jpg'}"
     cv2.imwrite(grid_path, imaging.draw_grid(imaging.fit_long_side(f.image, cfg.max_side), cfg.grid_cols, cfg.grid_rows))
     print(f"saved {args.out} and {grid_path}")
+    if args.ocr and f.signal == "OK":
+        from . import ocr
+
+        reader = ocr.ScreenReader(cfg)
+        try:
+            t0 = time.monotonic()
+            reader.engine()
+            t1 = time.monotonic()
+            rd = reader.read(f.image)
+        except ocr.OcrUnavailable as e:
+            print(f"OCR unavailable: {e}")
+            return
+        print(f"\nread_screen text ({rd.engine}: engine load {t1 - t0:.2f}s, OCR {rd.seconds:.2f}s, "
+              f"{len(rd.words)} words):")
+        print("\n".join(rd.lines) or "(no text found)")
+        if rd.graphics:
+            print("Non-text areas:", ", ".join(rd.graphics))
+
+
+def _ocr_test() -> None:
+    """Render a screen-like image with known text, read it back, report engine, speed and accuracy."""
+    import time
+
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    from . import ocr
+    from .config import Config
+
+    cfg = Config.from_env()
+    lines = ["OCR self-test 文字识别测试", "Invoice total: 1,234.56 USD", "会议时间 2026-10-28 14:30", "保存   取消"]
+    font = None
+    for name in ("msyh.ttc", "simhei.ttf", "NotoSansCJK-Regular.ttc", "wqy-microhei.ttc", "PingFang.ttc"):
+        for d in (os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"), "/usr/share/fonts", "/System/Library/Fonts"):
+            for root, _, files in os.walk(d) if os.path.isdir(d) else []:
+                if name in files:
+                    font = ImageFont.truetype(os.path.join(root, name), 20)
+                    break
+            if font:
+                break
+        if font:
+            break
+    if font is None:
+        print("note: no CJK font found, Chinese lines will not render properly")
+        font = ImageFont.load_default(size=20)
+    img = Image.new("RGB", (1920, 1080), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    for i, t in enumerate(lines):
+        d.text((200, 200 + i * 40), t, font=font, fill=(20, 20, 20))
+    frame = np.asarray(img)[:, :, ::-1].copy()
+    reader = ocr.ScreenReader(cfg)
+    t0 = time.monotonic()
+    try:
+        eng = reader.engine()
+    except ocr.OcrUnavailable as e:
+        print(f"OCR unavailable: {e}")
+        sys.exit(1)
+    t1 = time.monotonic()
+    rd = reader.read(frame)
+    t2 = time.monotonic()
+    reader.read(frame)
+    t3 = time.monotonic()
+    got = "".join("".join(rd.lines).split())
+    ok = sum(1 for t in lines if "".join(t.split()) in got)
+    print(f"engine: {eng.name}  (load {t1 - t0:.2f}s, full-screen OCR {t2 - t1:.2f}s, unchanged re-read {(t3 - t2) * 1000:.0f} ms)")
+    print("\n".join(rd.lines))
+    print(f"lines read exactly: {ok}/{len(lines)}")
 
 
 if __name__ == "__main__":

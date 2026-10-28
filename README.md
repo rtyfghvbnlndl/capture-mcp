@@ -33,7 +33,7 @@ C:\venvs\capmcp\Scripts\python -m pip install .[enum]
 ```
 
 - `[enum]` 安装 `cv2-enumerate-cameras`，用于拿到设备名称（强烈建议，否则只能按索引猜）。
-- 可选 OCR：`pip install -e .[ocr]`（rapidocr + onnxruntime；旧版 `rapidocr-onnxruntime` 也支持），装了才会出现 `read_text` 工具。
+- 读屏（OCR）：`pip install .[ocr]`，装了才有 `read_screen` 工具。Windows 上用系统自带 OCR，其他系统用 RapidOCR；Windows 上也想用 RapidOCR 就装 `.[ocr-rapid]`。安装脚本加 `-Ocr`（或给不支持图片的模型用 `-TextOnly`）。
 - **Windows 注意**：venv 路径不要太深。路径过长时 OpenCV 会报 `DLL load failed: 文件名或扩展名太长`。
 
 ## 自检（不经过 MCP）
@@ -90,11 +90,68 @@ C:\venvs\capmcp\Scripts\python -m capture_mcp --probe
 | `wait_for_change` | 服务端轮询，画面/区域变化才返回，告知变化在哪几格 | `timeout_s`(1-60), `region`, `threshold`, `return_image` |
 | `list_devices` | 列出所有视频设备：类型猜测（采集卡/摄像头）、有没有画面、分辨率/编码、当前用的是哪个、记住的是哪个。默认不打开摄像头 | `preview`: true 时附一张所有设备的缩略图拼图（会短暂打开摄像头） |
 | `select_device` | 切换设备并记住；`"auto"` 恢复自动并清除记忆。打不开时自动退回原来的设备 | `device`（索引/名称片段/auto）, `remember`（默认 true） |
-| `read_text` | OCR，返回 `[格子] 文字 (坐标)`（需安装 rapidocr） | `region` |
+| `read_screen` | 把屏幕读成**带排版的文字**（分栏、表格、选中项、颜色），不返回图片；见下一节 | `region`, `changes_only` |
 
 `region` 写法（都相对整屏，不随缩放变化）：`"C3"`、`"B2:D4"`、`"100,200,500,600"`（0–1000 归一化）、`""`=整屏。
 以下也能被接受：`"c 3"`、`"B2-D4"`、`"B2 to D4"`、`[100,200,500,600]`、`{"x1":..}`、0–1 小数。
 解析失败时错误信息里会带正确示例，方便模型自我纠正。
+
+## 纯文字读屏 / 端侧模型（read_screen）
+
+端侧小模型看一张截图要先过视觉编码器，一张 1280×720 的图通常要上千个 token，在低功耗 CPU 上很慢。
+`read_screen` 直接把屏幕变成**带排版的文字**返回，模型不用看图：
+
+```
+SCREEN TEXT (OCR, no image) of full screen | screen 1920x1080 | captured 14:32:05.120 (age 60 ms) | OCR 0.06s (windows)
+Legend: ── pane X ── = a separate column/window area; ▶ ...[selected] = selected row; [red]/[green]/[blue] = text color.
+── pane A1:A2 ──
+▶ 收件箱（12）[selected]
+已发送
+垃圾邮件
+── pane B1:D2 ──
+发票确认 Invoice #2041
+附件是十月份的发票，金额为 12800.00 元。
+付款已逾期 3 天[red]
+
+Non-text areas (images/graphics, OCR cannot read them): F1:H2
+```
+
+**保留的版面信息**
+
+| 屏幕上 | 文字里 |
+|---|---|
+| 侧边栏 / 主内容 / 多栏 | `── pane B1:D4 ──` 分栏标题（网格范围，可用 `region` 只读这一块） |
+| 表格（列对齐的多行） | `── table ──`，每行一条，单元格用 ` \| ` 分隔，表头会并进表格 |
+| 段落、区块间距 | 空行 |
+| 同一行里隔得很开的内容（菜单、工具栏） | 三个空格 |
+| 选中的列表项 | `▶ ...[selected]` |
+| 按钮、标签块 | `[button]` |
+| 红 / 绿 / 蓝字 | `[red]` `[green]` `[blue]` |
+| 灰字（禁用、占位提示） | `[dim]` |
+| 识别不确定（RapidOCR 有置信度） | `(?)` |
+| 图片、图表等没有文字的区域 | 末尾 `Non-text areas: C2:D3` |
+
+**快的原因**
+- Windows 上用系统自带 OCR（原生代码、无需下载模型）；Linux / 其他系统用 RapidOCR：检测用 PP-OCRv4 mobile（自带的 v6 small 检测 1080p 要 ~8 秒，mobile 快 10 倍），在缩到 960 像素的画面上检测，识别仍用原图；关闭方向分类。
+- 画面没变直接返回上次结果（毫秒级）；只变了一部分时只重新识别变化的区域。
+- 服务启动时后台预热 OCR 引擎。
+- `read_screen(changes_only=true)` 只返回和上次相比新增(+)/消失(-)的行，循环里反复读很省 token。
+
+**两个引擎怎么选**（4 种合成的 1080p 中英文界面，本机 Intel Ultra 5 125H；低压 4 核大约再慢 2~3 倍）：
+
+| 引擎 | 文字段完全正确 | 首次整屏 | 画面不变 | 适合 |
+|---|---|---|---|---|
+| Windows 自带 OCR（默认，Windows 上） | ~77% | ~0.07 秒 | ~7 毫秒 | 速度优先；中文为主 |
+| RapidOCR（`CAPTURE_OCR_ENGINE=rapid`；Linux 默认） | ~98% | ~1.2 秒 | ~14 毫秒 | 准确优先；中英文、数字混排 |
+
+Windows 中文识别器认英文和数字较弱（`Invoice`→`lnvoice`、`xlsx`→`又sx`），已做常见纠错（全角标点、`1乙800`→`12800`、`tO`→`to` 等）。Windows 上想要更准就装 `.[ocr-rapid]` 并设 `CAPTURE_OCR_ENGINE=rapid`。RapidOCR 首次使用会下载约 5 MB 的检测模型（安装脚本里的 `--ocr-test` 会提前下好）。
+
+**纯文字模式**：客户端配置的 `env` 里加 `"CAPTURE_TEXT_ONLY": "1"`（或安装时用 `-TextOnly` / `--text-only`）：
+不注册 `screenshot`/`zoom`，`wait_for_change` 改为"文字有变化才返回"，并直接返回变化的行；服务端说明也换成纯文字版。
+不支持图片的模型应该用这个模式。
+
+**局限**：OCR 会认错字（尤其中文识别器认英文/数字），看不到图标和图片内容；Windows 自带 OCR 需要对应语言包
+（设置 → 时间和语言 → 语言 → 添加语言时勾选"光学字符识别"）。需要逐字准确的内容，多模态模型可以再用 `zoom` 核对。
 
 ## 环境变量
 
@@ -108,6 +165,14 @@ C:\venvs\capmcp\Scripts\python -m capture_mcp --probe
 | `CAPTURE_MAX_SIDE` | 1280 | `detail=normal` 的长边像素；low=768，high=1920 |
 | `CAPTURE_JPEG_QUALITY` | 80 | 30–95 |
 | `CAPTURE_GRID` | 8x5 | 网格列x行（列用字母，最多 26） |
+| `CAPTURE_TEXT_ONLY` | 0 | 1 = 纯文字模式：不提供看图工具，给不支持图片的模型用 |
+| `CAPTURE_OCR_ENGINE` | auto | `auto`（Windows 用系统 OCR，否则 RapidOCR）/ `windows` / `rapid` / `none` |
+| `CAPTURE_OCR_LANG` | 空 | Windows OCR 语言，如 `zh-Hans-CN`、`en-US`；空 = 已安装的中文优先 |
+| `CAPTURE_OCR_SCALE` | 1.25 | Windows OCR 识别前放大倍数（实测 1.25 准确率/耗时最好） |
+| `CAPTURE_OCR_THREADS` | min(4, 核数) | RapidOCR 线程数 |
+| `CAPTURE_OCR_DET_SIZE` | 960 | RapidOCR 文字检测时把画面缩到的长边（0 = 原图）；实测 960 与原图准确率相同、快约一倍 |
+| `CAPTURE_OCR_GRAPHICS` | 1 | 是否报告没有文字的图片/图形区域 |
+| `CAPTURE_TEXT_MAX_CHARS` | 8000 | `read_screen` 输出上限，超出会截断并提示用 `region` |
 | `CAPTURE_AUTOCROP` | 1 | 自动裁掉**左右/上下对称**的黑边（源分辨率比例不同时） |
 | `CAPTURE_SAVE_DIR` | 空 | 把每张返回给模型的图存下来，排查"模型到底看到了什么" |
 | `CAPTURE_IDLE_RELEASE_S` | 0 | 空闲 N 秒后释放设备，0=从不释放。**采集卡保持 0**：释放后另一台电脑可能认为显示器被拔掉而反复调整显示。只在用普通摄像头、或想让 OBS 等程序接手设备时才设置 |
@@ -117,7 +182,7 @@ C:\venvs\capmcp\Scripts\python -m capture_mcp --probe
 ```
 你可以通过 capture-card 工具查看另一台电脑的屏幕（只能看，不能操作）。
 1. 先调用 screenshot。图上有网格：列 A,B,C…，行 1,2,3…，每格左上角有标签。
-2. 文字太小或不确定时，调用 zoom(region="C3") 或 zoom(region="B2:D3") 放大，不要猜。需要逐字准确时用 read_text。
+2. 文字太小或不确定时，调用 zoom(region="C3") 或 zoom(region="B2:D3") 放大，不要猜。大段文字可以用 read_screen 直接读成文字（更快）。
 3. 等待加载/弹窗时用 wait_for_change(timeout_s=20)，不要反复截图。
 4. 工具返回 NO IMAGE / ERROR 时，如实告诉用户，不要编造屏幕内容。
 5. 描述位置时用网格名（例如"右上角 G1 格的按钮"）。
@@ -144,4 +209,5 @@ C:\venvs\capmcp\Scripts\python -m capture_mcp --probe
 - **1080p 很卡**：确认 `list_devices` 里 fourcc 是 MJPG；不是的话换 `CAPTURE_BACKEND=msmf` 或降分辨率。
 - **画面四周有黑边 / 坐标偏**：确认 `CAPTURE_AUTOCROP=1`；或把源电脑分辨率设为与采集分辨率同比例（16:9）。
 - **首次调用慢**：首次调用才打开设备（Windows 上 1–6 秒），之后设备一直保持打开，截图很快。
-- **read_text 慢**：rapidocr 在 CPU 上每次约 5–10 秒（实测与图片大小关系不大），第一次还要加载模型。它是可选的，平时优先用 zoom；只在需要逐字准确（数字、代码）时用。
+- **read_screen 认错字**：OCR 的局限，中文识别器认英文/数字较弱。可以先用 `--ocr-test` 看引擎效果；Windows 上可以试 `CAPTURE_OCR_SCALE=1.5`，或装 `.[ocr-rapid]` 并设 `CAPTURE_OCR_ENGINE=rapid` 对比。
+- **read_screen 说 OCR 不可用**：Windows 上装 `.[ocr]` 并确认装了 OCR 语言包；其他系统装 `.[ocr]`（RapidOCR）。
